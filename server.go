@@ -100,6 +100,9 @@ func (s *Server) Handler(conn net.Conn) {
 	// 上线广播
 	user.Online()
 
+	// 监听用户是否活跃的 channel
+	isLive := make(chan bool)
+
 	// 接受客户端发送的消息
 	go func() {
 		buf := make([]byte, 4096)
@@ -109,19 +112,45 @@ func (s *Server) Handler(conn net.Conn) {
 				user.Offline()
 				return
 			}
-
 			if err != nil && err != io.EOF {
 				fmt.Println("Conn Read err:", err)
 				return
 			}
-
 			// 提取用户的消息(去除'\n')
 			msg := string(buf[:n-1])
-
 			// 用户针对msg进行消息处理
 			user.DoMessage(msg)
+			// 用户的任意消息，代表当前用户是一个活跃的
+			isLive <- true
 		}
 	}()
+
+	timer := time.NewTimer(600 * time.Second)
+	// 当前 handler 阻塞
+	for {
+		select {
+		case <-isLive:
+			// 收到心跳信号
+			// 重置定时器，让它重新开始倒计时
+			// 如果 timer 已经触发但还没被接收，Reset 会返回 false。
+			// 为了安全，先尝试停止它。
+			if !timer.Stop() {
+				// 如果 Stop 返回 false，说明 timer 已经触发并且其 channel 中有值了，
+				// 为了防止下一次 select 读到这个旧的值，需要清空 channel。
+				<-timer.C
+			}
+			timer.Reset(10 * time.Second)
+		case <-timer.C:
+			// 超时，timer.C channel 收到了值
+			user.SendMsg("过长时间未活跃被移出聊天")
+			// 销毁资源
+			close(user.C)
+			// 关闭连接
+			conn.Close()
+			// 退出当前 handler
+			return
+		}
+	}
 
 	// 当前 handler 阻塞
 	select {}
