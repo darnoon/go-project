@@ -3,34 +3,80 @@ package main
 import (
 	"fmt"
 	"net"
-	"strconv"
+	"sync"
+	"time"
 )
 
 type Server struct {
 	Ip   string
 	Port int
+
+	// 在线用户的列表
+	OnlineMap map[string]*User
+	mapLock   sync.RWMutex
+
+	// 消息广播的channel
+	Message chan string
 }
 
 // 创建一个 server 的接口
 func NewServer(ip string, port int) *Server {
-	return &Server{Ip: ip, Port: port}
+	server := &Server{
+		Ip:        ip,
+		Port:      port,
+		OnlineMap: make(map[string]*User),
+		Message:   make(chan string),
+	}
+
+	return server
 }
 
-func (s *Server) Handler(conn net.Conn) {
-	// 当前连接的业务
-	fmt.Println("连接建立成功")
+// 监听 Message 广播消息 channel 的 goroutine，一旦有消息就发送给全部的在线 User
+func (this *Server) ListenMessager() {
+	for {
+		msg := <-this.Message
+
+		// 将 msg 发送给全部的在线 User
+		// 首先快速复制出所有 channel，防止锁释放不及时
+		this.mapLock.RLock()
+		targets := make([]chan string, 0, len(this.OnlineMap))
+		for _, user := range this.OnlineMap {
+			targets = append(targets, user.C)
+		}
+		this.mapLock.RUnlock()
+
+		for _, userChan := range targets {
+			// 使用临时变量，避免闭包问题
+			ch := userChan
+			go func() {
+				// 使用 select 结构实现带超时的非阻塞发送
+				select {
+				case ch <- msg:
+					// 消息成功发送
+				case <-time.After(100 * time.Millisecond): // 比如设置 100 毫秒的超时
+					// 超时了，意味着对方 goroutine 可能卡住了
+					// 我们可以选择记录日志，或者干脆放弃这次发送
+					fmt.Println("发送消息超时，用户可能已拥堵。")
+				}
+			}()
+		}
+	}
 }
 
 // 启动服务器的接口
 func (s *Server) Start() {
 	// socket listen
-	listener, err := net.Listen("tcp", s.Ip+":"+strconv.Itoa(s.Port))
+	address := fmt.Sprintf("%s:%d", s.Ip, s.Port)
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		fmt.Println("net.Listen err:", err)
 		return
 	}
 	// close listen socket
 	defer listener.Close()
+
+	// 启动监听 Message 的 goroutine
+	go s.ListenMessager()
 
 	for {
 		// accept
@@ -42,4 +88,30 @@ func (s *Server) Start() {
 		// do handler
 		go s.Handler(conn)
 	}
+}
+
+// 建立连接后的业务
+func (s *Server) Handler(conn net.Conn) {
+	// 当前连接的业务
+	// fmt.Println("连接建立成功")
+	user := NewUser(conn)
+
+	// 用户上线，将用户设置好并加入到 onlineMap 中
+	// 写锁
+	s.mapLock.Lock()
+	s.OnlineMap[user.Name] = user
+	s.mapLock.Unlock()
+
+	// 广播当前用户上线消息
+	s.BroadCast(user, "已上线")
+
+	// 当前 handler 阻塞
+	select {}
+}
+
+// 广播消息
+func (this *Server) BroadCast(user *User, msg string) {
+	sendMsg := "[" + user.Addr + "]" + user.Name + ":" + msg
+
+	this.Message <- sendMsg
 }
