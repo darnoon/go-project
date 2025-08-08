@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -94,16 +95,33 @@ func (s *Server) Start() {
 func (s *Server) Handler(conn net.Conn) {
 	// 当前连接的业务
 	// fmt.Println("连接建立成功")
-	user := NewUser(conn)
+	user := NewUser(conn, s)
 
-	// 用户上线，将用户设置好并加入到 onlineMap 中
-	// 写锁
-	s.mapLock.Lock()
-	s.OnlineMap[user.Name] = user
-	s.mapLock.Unlock()
+	// 上线广播
+	user.Online()
 
-	// 广播当前用户上线消息
-	s.BroadCast(user, "已上线")
+	// 接受客户端发送的消息
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if n == 0 {
+				user.Offline()
+				return
+			}
+
+			if err != nil && err != io.EOF {
+				fmt.Println("Conn Read err:", err)
+				return
+			}
+
+			// 提取用户的消息(去除'\n')
+			msg := string(buf[:n-1])
+
+			// 用户针对msg进行消息处理
+			user.DoMessage(msg)
+		}
+	}()
 
 	// 当前 handler 阻塞
 	select {}
